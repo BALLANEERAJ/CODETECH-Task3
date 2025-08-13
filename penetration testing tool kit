@@ -1,0 +1,375 @@
+#!/usr/bin/env python3
+"""
+Modular Penetration Testing Toolkit
+Educational Purpose Only - Use only on systems you own or have explicit permission to test
+"""
+
+import socket
+import threading
+import time
+import itertools
+import string
+import hashlib
+import paramiko
+import requests
+from concurrent.futures import ThreadPoolExecutor
+import argparse
+import sys
+from datetime import datetime
+
+class Colors:
+    """Color codes for terminal output"""
+    HEADER = '\033[95m'
+    BLUE = '\033[94m'
+    CYAN = '\033[96m'
+    GREEN = '\033[92m'
+    WARNING = '\033[93m'
+    FAIL = '\033[91m'
+    ENDC = '\033[0m'
+    BOLD = '\033[1m'
+
+class Logger:
+    """Simple logging utility"""
+    @staticmethod
+    def info(message):
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        print(f"{Colors.CYAN}[{timestamp}] INFO: {message}{Colors.ENDC}")
+    
+    @staticmethod
+    def success(message):
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        print(f"{Colors.GREEN}[{timestamp}] SUCCESS: {message}{Colors.ENDC}")
+    
+    @staticmethod
+    def warning(message):
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        print(f"{Colors.WARNING}[{timestamp}] WARNING: {message}{Colors.ENDC}")
+    
+    @staticmethod
+    def error(message):
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        print(f"{Colors.FAIL}[{timestamp}] ERROR: {message}{Colors.ENDC}")
+
+class PortScanner:
+    """Port scanning module"""
+    
+    def __init__(self, timeout=3):
+        self.timeout = timeout
+        self.open_ports = []
+    
+    def scan_port(self, host, port):
+        """Scan a single port"""
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(self.timeout)
+            result = sock.connect_ex((host, port))
+            sock.close()
+            
+            if result == 0:
+                self.open_ports.append(port)
+                Logger.success(f"Port {port} is open on {host}")
+                return True
+            return False
+        except socket.gaierror:
+            Logger.error(f"Unable to resolve host {host}")
+            return False
+        except Exception as e:
+            Logger.error(f"Error scanning port {port}: {str(e)}")
+            return False
+    
+    def scan_range(self, host, start_port, end_port, threads=100):
+        """Scan a range of ports using threading"""
+        Logger.info(f"Starting port scan on {host} from {start_port} to {end_port}")
+        
+        with ThreadPoolExecutor(max_workers=threads) as executor:
+            futures = [executor.submit(self.scan_port, host, port) 
+                      for port in range(start_port, end_port + 1)]
+            
+            for future in futures:
+                future.result()
+        
+        Logger.info(f"Port scan completed. Found {len(self.open_ports)} open ports")
+        return self.open_ports
+    
+    def scan_common_ports(self, host):
+        """Scan common ports"""
+        common_ports = [21, 22, 23, 25, 53, 80, 110, 111, 135, 139, 143, 443, 
+                       993, 995, 1723, 3306, 3389, 5900, 8080]
+        
+        Logger.info(f"Scanning common ports on {host}")
+        
+        with ThreadPoolExecutor(max_workers=50) as executor:
+            futures = [executor.submit(self.scan_port, host, port) for port in common_ports]
+            for future in futures:
+                future.result()
+        
+        return self.open_ports
+
+class BruteForcer:
+    """Brute force attack module"""
+    
+    def __init__(self):
+        self.found_credentials = []
+    
+    def ssh_brute_force(self, host, port, usernames, passwords, timeout=5):
+        """SSH brute force attack"""
+        Logger.info(f"Starting SSH brute force on {host}:{port}")
+        
+        for username in usernames:
+            for password in passwords:
+                try:
+                    ssh = paramiko.SSHClient()
+                    ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+                    ssh.connect(host, port=port, username=username, password=password, timeout=timeout)
+                    
+                    Logger.success(f"SSH credentials found: {username}:{password}")
+                    self.found_credentials.append((username, password))
+                    ssh.close()
+                    return True
+                    
+                except paramiko.AuthenticationException:
+                    Logger.info(f"Failed: {username}:{password}")
+                except Exception as e:
+                    Logger.error(f"SSH connection error: {str(e)}")
+                    break
+        
+        return False
+    
+    def http_brute_force(self, url, usernames, passwords, form_data=None):
+        """HTTP form brute force"""
+        Logger.info(f"Starting HTTP brute force on {url}")
+        
+        for username in usernames:
+            for password in passwords:
+                try:
+                    data = form_data.copy() if form_data else {}
+                    data.update({'username': username, 'password': password})
+                    
+                    response = requests.post(url, data=data, timeout=10, allow_redirects=False)
+                    
+                    # Check for successful login indicators
+                    if response.status_code == 302 or "welcome" in response.text.lower() or "dashboard" in response.text.lower():
+                        Logger.success(f"HTTP credentials found: {username}:{password}")
+                        self.found_credentials.append((username, password))
+                        return True
+                    else:
+                        Logger.info(f"Failed: {username}:{password}")
+                        
+                except Exception as e:
+                    Logger.error(f"HTTP request error: {str(e)}")
+        
+        return False
+    
+    def generate_passwords(self, charset, min_length, max_length):
+        """Generate password combinations"""
+        for length in range(min_length, max_length + 1):
+            for password in itertools.product(charset, repeat=length):
+                yield ''.join(password)
+
+class NetworkMapper:
+    """Network discovery and mapping module"""
+    
+    def __init__(self):
+        self.live_hosts = []
+    
+    def ping_sweep(self, network_base, start_ip, end_ip):
+        """Perform ping sweep to discover live hosts"""
+        Logger.info(f"Starting ping sweep on {network_base}.{start_ip}-{end_ip}")
+        
+        def ping_host(ip):
+            import subprocess
+            import platform
+            
+            param = '-n' if platform.system().lower() == 'windows' else '-c'
+            command = ['ping', param, '1', f"{network_base}.{ip}"]
+            
+            try:
+                result = subprocess.run(command, capture_output=True, timeout=2)
+                if result.returncode == 0:
+                    host = f"{network_base}.{ip}"
+                    self.live_hosts.append(host)
+                    Logger.success(f"Host {host} is alive")
+                    return True
+            except subprocess.TimeoutExpired:
+                pass
+            except Exception as e:
+                Logger.error(f"Error pinging {network_base}.{ip}: {str(e)}")
+            
+            return False
+        
+        with ThreadPoolExecutor(max_workers=50) as executor:
+            futures = [executor.submit(ping_host, ip) for ip in range(start_ip, end_ip + 1)]
+            for future in futures:
+                future.result()
+        
+        Logger.info(f"Ping sweep completed. Found {len(self.live_hosts)} live hosts")
+        return self.live_hosts
+
+class VulnerabilityScanner:
+    """Basic vulnerability scanning module"""
+    
+    def __init__(self):
+        self.vulnerabilities = []
+    
+    def check_ssh_version(self, host, port=22):
+        """Check SSH version for known vulnerabilities"""
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(5)
+            sock.connect((host, port))
+            
+            banner = sock.recv(1024).decode().strip()
+            sock.close()
+            
+            Logger.info(f"SSH Banner: {banner}")
+            
+            # Check for vulnerable SSH versions
+            vulnerable_versions = ['OpenSSH_4.', 'OpenSSH_5.', 'OpenSSH_6.0', 'OpenSSH_6.1']
+            for vuln_version in vulnerable_versions:
+                if vuln_version in banner:
+                    vuln = f"Potentially vulnerable SSH version detected: {banner}"
+                    self.vulnerabilities.append(vuln)
+                    Logger.warning(vuln)
+                    return True
+                    
+        except Exception as e:
+            Logger.error(f"Error checking SSH version on {host}:{port} - {str(e)}")
+        
+        return False
+    
+    def check_http_headers(self, url):
+        """Check HTTP headers for security misconfigurations"""
+        try:
+            response = requests.get(url, timeout=10)
+            headers = response.headers
+            
+            security_headers = {
+                'X-Frame-Options': 'Missing X-Frame-Options header',
+                'X-XSS-Protection': 'Missing X-XSS-Protection header',
+                'X-Content-Type-Options': 'Missing X-Content-Type-Options header',
+                'Strict-Transport-Security': 'Missing HSTS header'
+            }
+            
+            for header, message in security_headers.items():
+                if header not in headers:
+                    self.vulnerabilities.append(f"{url}: {message}")
+                    Logger.warning(f"{url}: {message}")
+            
+            # Check server header
+            if 'Server' in headers:
+                server = headers['Server']
+                Logger.info(f"Server header: {server}")
+                
+        except Exception as e:
+            Logger.error(f"Error checking HTTP headers for {url}: {str(e)}")
+
+class PentestToolkit:
+    """Main toolkit class that orchestrates all modules"""
+    
+    def __init__(self):
+        self.port_scanner = PortScanner()
+        self.brute_forcer = BruteForcer()
+        self.network_mapper = NetworkMapper()
+        self.vuln_scanner = VulnerabilityScanner()
+        
+        print(f"{Colors.HEADER}{Colors.BOLD}")
+        print("=" * 60)
+        print("    MODULAR PENETRATION TESTING TOOLKIT")
+        print("    Educational Use Only - Test Responsibly")
+        print("=" * 60)
+        print(f"{Colors.ENDC}")
+    
+    def run_full_scan(self, target):
+        """Run a comprehensive scan on target"""
+        Logger.info(f"Starting comprehensive scan on {target}")
+        
+        # 1. Port scan
+        open_ports = self.port_scanner.scan_common_ports(target)
+        
+        # 2. Vulnerability checks
+        if 22 in open_ports:
+            self.vuln_scanner.check_ssh_version(target)
+        
+        if 80 in open_ports:
+            self.vuln_scanner.check_http_headers(f"http://{target}")
+        
+        if 443 in open_ports:
+            self.vuln_scanner.check_http_headers(f"https://{target}")
+        
+        # 3. Generate report
+        self.generate_report(target)
+    
+    def generate_report(self, target):
+        """Generate scan report"""
+        print(f"\n{Colors.HEADER}{Colors.BOLD}=== SCAN REPORT FOR {target} ==={Colors.ENDC}")
+        
+        print(f"\n{Colors.BLUE}Open Ports:{Colors.ENDC}")
+        if self.port_scanner.open_ports:
+            for port in sorted(self.port_scanner.open_ports):
+                print(f"  - Port {port}/tcp")
+        else:
+            print("  - No open ports found")
+        
+        print(f"\n{Colors.BLUE}Vulnerabilities:{Colors.ENDC}")
+        if self.vuln_scanner.vulnerabilities:
+            for vuln in self.vuln_scanner.vulnerabilities:
+                print(f"  - {vuln}")
+        else:
+            print("  - No vulnerabilities detected")
+        
+        print(f"\n{Colors.BLUE}Found Credentials:{Colors.ENDC}")
+        if self.brute_forcer.found_credentials:
+            for username, password in self.brute_forcer.found_credentials:
+                print(f"  - {username}:{password}")
+        else:
+            print("  - No credentials found")
+
+def main():
+    """Main function with command line interface"""
+    parser = argparse.ArgumentParser(description="Modular Penetration Testing Toolkit")
+    parser.add_argument("-t", "--target", help="Target host or IP address")
+    parser.add_argument("-p", "--ports", help="Port range (e.g., 1-1000)")
+    parser.add_argument("--ssh-brute", action="store_true", help="Perform SSH brute force")
+    parser.add_argument("--http-brute", help="HTTP form brute force URL")
+    parser.add_argument("--ping-sweep", help="Network range for ping sweep (e.g., 192.168.1)")
+    parser.add_argument("--full-scan", action="store_true", help="Perform comprehensive scan")
+    
+    args = parser.parse_args()
+    
+    toolkit = PentestToolkit()
+    
+    if not any([args.target, args.ping_sweep]):
+        print("Please specify a target with -t or use --ping-sweep")
+        return
+    
+    try:
+        if args.full_scan and args.target:
+            toolkit.run_full_scan(args.target)
+        
+        elif args.target and args.ports:
+            start_port, end_port = map(int, args.ports.split('-'))
+            toolkit.port_scanner.scan_range(args.target, start_port, end_port)
+        
+        elif args.target:
+            toolkit.port_scanner.scan_common_ports(args.target)
+        
+        if args.ssh_brute and args.target:
+            usernames = ['admin', 'root', 'user', 'test']
+            passwords = ['password', '123456', 'admin', 'root', 'test']
+            toolkit.brute_forcer.ssh_brute_force(args.target, 22, usernames, passwords)
+        
+        if args.http_brute:
+            usernames = ['admin', 'administrator', 'user']
+            passwords = ['password', '123456', 'admin']
+            toolkit.brute_forcer.http_brute_force(args.http_brute, usernames, passwords)
+        
+        if args.ping_sweep:
+            toolkit.network_mapper.ping_sweep(args.ping_sweep, 1, 254)
+            
+    except KeyboardInterrupt:
+        Logger.info("Scan interrupted by user")
+    except Exception as e:
+        Logger.error(f"Error during execution: {str(e)}")
+
+if __name__ == "__main__":
+    main()
